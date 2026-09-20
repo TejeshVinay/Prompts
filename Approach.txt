@@ -1,0 +1,1001 @@
+# SCP Intelligent Alert Reduction & Investigation System
+
+## Master Discovery, Feasibility Analysis & Solution Design Prompt
+
+You are acting as a **Senior AI/ML Architect and Financial Surveillance Systems Architect**.
+
+Your task is **NOT to immediately implement a solution**.
+
+Your first responsibility is to deeply understand the existing SCP alert-generation ecosystem, the available datasets, the existing rule logic, the existing solution approach, and the business constraints.
+
+Only after building that understanding should you determine whether the previously discussed AI/ML/Agentic approaches are feasible, which approaches are appropriate, and how the problem should ultimately be solved.
+
+---
+
+# 1. Business Problem
+
+We are working with a financial-trade surveillance / Supervisory Control Portal (SCP) use case.
+
+The current high-level flow is understood to be approximately:
+
+```text
+Upstream Trading Systems
+        ↓
+Data Ingestion / Processing
+        ↓
+Existing Deterministic Rules
+        ↓
+SCP Alerts
+        ↓
+Supervisor Review
+        ↓
+Signoff / RFI / Other Action
+```
+
+The existing deterministic rule engine is already operational and is considered by business stakeholders to be functioning reasonably well.
+
+However, it generates a significant number of alerts that require manual supervisory review.
+
+The approximate historical dataset available to us contains around **50,000 generated alerts** with a large number of attributes.
+
+The business objective is to investigate whether AI/ML and agentic techniques can:
+
+* reduce unnecessary formal alert generation where appropriate,
+* reduce BAU / low-value alert volume,
+* reduce supervisory investigation effort,
+* identify genuinely unusual behaviour,
+* provide contextual evidence around rule hits,
+* improve alert prioritization and actionability,
+* connect related alerts/trades/entities,
+* and provide explainable reasoning for why an alert should or should not receive further attention.
+
+There is an important business/control constraint:
+
+> Once an official SCP alert is generated, the supervisor is expected to review it.
+
+Therefore, **do not assume that an AI system is allowed to suppress or close an official alert**.
+
+Instead, determine from the actual system architecture whether there is a meaningful intermediate concept such as:
+
+```text
+Rule Evaluation
+      ↓
+Rule Hit / Candidate
+      ↓
+Alert Creation
+```
+
+If such a candidate stage exists, investigate whether an intelligence layer could safely operate there.
+
+If it does not exist, explicitly identify that limitation.
+
+---
+
+# 2. Available Inputs
+
+The following files/data sources will be available on the office machine.
+
+## Dataset 1 — GR CAL EXPORT.xlsx
+
+This contains approximately **50k historical SCP alerts generated after the existing rule engine**.
+
+Perform a comprehensive analysis of:
+
+* number of records,
+* columns,
+* data types,
+* missing values,
+* unique values,
+* cardinality,
+* categorical distributions,
+* numerical distributions,
+* temporal coverage,
+* duplicate records,
+* potential identifiers,
+* rule-related attributes,
+* entity-related attributes,
+* trade-related attributes,
+* alert-related attributes,
+* supervisor/action-related attributes,
+* comments/signoff/RFI information,
+* and any other useful fields.
+
+Do NOT assume that the dataset is unlabeled simply because it does not contain an explicit ML label.
+
+Investigate whether historical supervisor outcomes can potentially act as:
+
+```text
+historical outcome / target
+```
+
+while ensuring that post-alert information is not incorrectly used as an input feature for a prediction that is supposed to occur before alert creation.
+
+---
+
+# 3. Dataset 2 — GR CAL Attribute Analysis Pack.xlsx
+
+This file contains existing analysis performed on the attributes for different layers of the proposed solution, including areas such as:
+
+* episodic linking,
+* attribute relationships,
+* behavioural patterns,
+* alert relationships,
+* and potentially other analytical layers.
+
+Study this file carefully.
+
+Do NOT redo analysis blindly.
+
+Instead:
+
+1. Understand what has already been investigated.
+2. Identify conclusions already established.
+3. Identify assumptions behind those conclusions.
+4. Identify useful features already discovered.
+5. Identify gaps.
+6. Identify contradictory findings.
+7. Identify analyses that should be validated using the 50k dataset.
+8. Identify which attributes appear useful for:
+
+   * episodic linking,
+   * anomaly detection,
+   * actionability prediction,
+   * contextual retrieval,
+   * explainability,
+   * and agent reasoning.
+
+---
+
+# 4. Existing Rule Implementation Files
+
+There are also Excel files containing records of rules implemented on data received from upstream systems.
+
+Some of these rules are written in a language that resembles SQL but is **not necessarily standard SQL**.
+
+Treat these files as extremely important.
+
+Your objective is to reverse-engineer the existing rule ecosystem.
+
+For each rule or rule family, determine where possible:
+
+* rule identifier,
+* rule description,
+* source system,
+* input attributes,
+* conditions,
+* thresholds,
+* joins/relationships,
+* time windows,
+* aggregation logic,
+* output,
+* alert type,
+* dependencies,
+* and downstream effect.
+
+Do NOT assume that the syntax is SQL.
+
+First determine what language/DSL/pattern it actually resembles.
+
+If the semantics cannot be confidently determined, explicitly mark them as:
+
+```text
+UNKNOWN / REQUIRES DOMAIN VALIDATION
+```
+
+Do not invent interpretations.
+
+Most importantly, determine whether the existing architecture has a conceptual distinction between:
+
+```text
+Rule condition matched
+```
+
+and
+
+```text
+Official SCP alert created
+```
+
+This distinction is critical to the proposed AI architecture.
+
+---
+
+# 5. Existing Solution Approach
+
+There is also a document describing the current version of the proposed solution.
+
+Read it completely.
+
+Understand:
+
+* current problem definition,
+* current architecture,
+* proposed components,
+* current assumptions,
+* current ML approach,
+* episodic linking approach,
+* explainability approach,
+* agentic approach,
+* data flow,
+* expected outputs,
+* and any limitations.
+
+Do not silently replace the current solution.
+
+Instead, treat it as the **baseline proposal** that we are now evaluating and strengthening.
+
+---
+
+# 6. First Objective — Build a Strong Understanding
+
+Before proposing any new architecture, create a consolidated understanding of the system.
+
+Produce a concise but technically deep analysis covering:
+
+### A. Current system
+
+```text
+Upstream Systems
+      ↓
+Data Processing
+      ↓
+Existing Rules
+      ↓
+Alert Generation
+      ↓
+SCP
+      ↓
+Supervisor
+```
+
+Replace this conceptual flow with the **actual flow discovered from the provided files**.
+
+### B. Data understanding
+
+Explain:
+
+* what one row represents,
+* what an alert represents,
+* important entities,
+* important relationships,
+* important timestamps,
+* important rule attributes,
+* important supervisor/action attributes.
+
+### C. Rule understanding
+
+Build a conceptual map of:
+
+```text
+Upstream Data
+     ↓
+Rule Inputs
+     ↓
+Rule Evaluation
+     ↓
+Rule Hit
+     ↓
+Alert Creation
+```
+
+Clearly identify which stages are confirmed versus inferred.
+
+### D. Historical outcome understanding
+
+Determine what happened to historical alerts.
+
+For example:
+
+```text
+Alert
+ ↓
+RFI?
+ ↓
+Signoff?
+ ↓
+Comments?
+ ↓
+Escalation?
+```
+
+Determine whether these outcomes can be transformed into reliable historical targets.
+
+---
+
+# 7. Identify the Actual Optimization Problem
+
+Do not assume that the problem is simply:
+
+> "Detect anomalies."
+
+Investigate which of the following problems we actually have:
+
+### Problem A — Alert prioritization
+
+```text
+Rule
+ ↓
+Alert
+ ↓
+ML
+ ↓
+Priority
+ ↓
+Supervisor
+```
+
+This does not reduce official alert volume but may reduce supervisory effort.
+
+### Problem B — Behavioural anomaly detection
+
+```text
+Trade / Alert
+ ↓
+ML
+ ↓
+Novelty / Anomaly Score
+```
+
+Determine whether this can identify behaviour that is unusual relative to historical behaviour.
+
+### Problem C — Actionability prediction
+
+Investigate whether historical supervisor outcomes can answer:
+
+> "Which rule hits historically required meaningful supervisory attention?"
+
+Potential targets could include RFI, escalation, investigation outcome, or other validated business outcomes.
+
+Do not assume these are automatically good labels.
+
+### Problem D — Intelligent rule calibration
+
+Investigate whether historical behaviour can help improve:
+
+* thresholds,
+* time windows,
+* parameters,
+* rule combinations,
+* or rule applicability.
+
+### Problem E — Pre-alert contextual adjudication
+
+Investigate whether the architecture permits:
+
+```text
+Rule Hit
+   ↓
+ML + Context
+   ↓
+Agent
+   ↓
+Deterministic Policy
+   ↓
+Formal Alert
+```
+
+This is the most important architectural question.
+
+---
+
+# 8. Discussed AI/ML Approach
+
+The following approaches have been discussed and should now be treated as hypotheses to evaluate — **not predetermined solutions**.
+
+## 8.1 Episodic Linking
+
+Investigate whether alerts can be grouped into meaningful episodes using:
+
+* entity,
+* trade,
+* instrument,
+* lifecycle,
+* time proximity,
+* desk,
+* venue,
+* rule relationships,
+* and other available attributes.
+
+Potential conceptual representation:
+
+```text
+Entity
+  │
+  ├── Trade
+  │     ├── Alert
+  │     └── Alert
+  │
+  └── Related Trade
+        └── Alert
+```
+
+Determine whether graph-based representation is actually useful.
+
+Do not introduce a graph database merely because GraphRAG is being considered.
+
+First prove the relationships.
+
+---
+
+# 9. Unsupervised Behavioural Detection
+
+Evaluate the feasibility of:
+
+* Isolation Forest
+* Local Outlier Factor
+* Autoencoder
+* One-Class SVM
+
+The objective is not simply to produce four anomaly scores.
+
+Investigate:
+
+* what constitutes normal behaviour,
+* whether BAU dominates the dataset,
+* whether the feature space is suitable,
+* whether anomalies are global or local,
+* whether temporal behaviour matters,
+* whether rule-specific models are necessary,
+* whether entity-specific baselines are required,
+* and whether an ensemble actually provides additional value.
+
+The output should ideally become something conceptually like:
+
+```text
+Behavioural Novelty Score
+```
+
+rather than:
+
+```text
+Anomaly = Fraud
+```
+
+Do not equate statistical anomaly with regulatory relevance.
+
+---
+
+# 10. Historical Actionability Modelling
+
+Investigate whether the 50k records contain sufficient historical outcome information to create a supervised or weakly supervised target.
+
+Example:
+
+```text
+Features available at T0
+        ↓
+Rule Hit
+        ↓
+Historical Supervisor Outcome
+        ↓
+Target
+```
+
+Potential targets may include:
+
+* RFI,
+* escalation,
+* meaningful investigation,
+* repeated investigation,
+* or other validated outcomes.
+
+Determine:
+
+1. whether the outcomes are sufficiently consistent,
+2. whether the labels are severely imbalanced,
+3. whether comments can be converted into structured categories,
+4. whether weak supervision is appropriate,
+5. whether supervised modelling is feasible.
+
+Explicitly distinguish:
+
+```text
+Feature available before decision
+```
+
+from
+
+```text
+Outcome observed after decision
+```
+
+to prevent leakage.
+
+---
+
+# 11. Graph / GraphRAG Investigation
+
+Investigate whether a graph representation adds meaningful value.
+
+Potential nodes:
+
+```text
+Entity
+Trade
+Order
+Instrument
+Alert
+Rule
+Episode
+Desk
+Venue
+Time Window
+```
+
+Potential relationships:
+
+```text
+ENTITY → EXECUTED → TRADE
+TRADE → GENERATED → ALERT
+ALERT → TRIGGERED_BY → RULE
+ALERT → RELATED_TO → ALERT
+TRADE → PART_OF → EPISODE
+ENTITY → ASSOCIATED_WITH → ENTITY
+```
+
+Determine:
+
+* which relationships can actually be derived from the data,
+* which relationships are reliable,
+* which are speculative,
+* and whether graph traversal provides information that normal relational retrieval cannot.
+
+Only recommend Neo4j/Qdrant/GraphRAG if justified by the analysis.
+
+---
+
+# 12. Agentic AI Investigation
+
+Evaluate the role of an AI agent.
+
+The agent should NOT automatically be assumed to be:
+
+* the anomaly detector,
+* the final decision-maker,
+* the rule engine,
+* the regulator-facing authority,
+* or the alert suppressor.
+
+Instead investigate the following role:
+
+```text
+Rule Hit
+   ↓
+Evidence Retrieval
+   ↓
+ML Scores
+   ↓
+Historical Alerts
+   ↓
+Episode / Graph Context
+   ↓
+Agent Reasoning
+   ↓
+Structured Assessment
+```
+
+Potential agent tools could include:
+
+```text
+get_rule_definition()
+get_trade_history()
+get_entity_history()
+get_previous_alerts()
+get_similar_alerts()
+get_episode()
+get_related_entities()
+get_market_context()
+get_previous_dispositions()
+```
+
+Determine which of these tools are actually feasible from the available data.
+
+The agent should produce evidence-backed structured output rather than unconstrained natural-language decisions.
+
+---
+
+# 13. Critical Architectural Question
+
+Investigate this carefully:
+
+> **Does the existing system have a meaningful "rule hit / candidate" stage before an official SCP alert is created?**
+
+There are two possibilities.
+
+### Architecture A
+
+```text
+Rule Engine
+    ↓
+Rule Hit
+    ↓
+Alert Creation
+```
+
+If this exists, investigate:
+
+```text
+Rule Hit
+   ↓
+AI Intelligence Layer
+   ↓
+Deterministic Policy
+   ↓
+Formal Alert / Candidate
+```
+
+### Architecture B
+
+```text
+Rule Engine
+    ↓
+Official SCP Alert
+```
+
+If this is the actual architecture, do NOT pretend an AI gate can simply be inserted.
+
+Instead investigate alternatives:
+
+* rule calibration,
+* shadow scoring,
+* alert prioritization,
+* post-alert investigation,
+* or whether a candidate abstraction could be introduced.
+
+---
+
+# 14. Proposed Hybrid Architecture to Evaluate
+
+Use the following as a **candidate architecture**, not as a requirement:
+
+```text
+                  EXISTING RULE ENGINE
+                          │
+                          ▼
+                       RULE HIT
+                          │
+             ┌────────────┴────────────┐
+             │                         │
+             ▼                         ▼
+      ML Behavioural              Context / Graph
+          Score                    Retrieval
+             │                         │
+             │                         ▼
+             │                   Historical Context
+             │                         │
+             └────────────┬────────────┘
+                          ▼
+                    Agent Reasoning
+                          │
+                          ▼
+                 Structured Assessment
+                          │
+                          ▼
+                 Deterministic Policy
+                    /           \
+                   /             \
+                  ▼               ▼
+          FORMAL ALERT       RETAIN CANDIDATE
+                  │
+                  ▼
+              SUPERVISOR
+```
+
+Evaluate this architecture objectively.
+
+Do not assume it is correct.
+
+Determine:
+
+* which components are feasible now,
+* which require additional data,
+* which require changes to the existing system,
+* which require business approval,
+* which introduce operational risk,
+* and which should remain future-state.
+
+---
+
+# 15. Shadow Mode Must Be Considered
+
+Because official SCP alerts currently require supervisory review, investigate a shadow-mode implementation first:
+
+```text
+Existing Production Flow
+        │
+        └──────────────→ Official Alert → Supervisor
+        │
+        ▼
+ AI Shadow Pipeline
+        │
+        ├── ML score
+        ├── Retrieval
+        ├── Agent reasoning
+        └── Hypothetical decision
+```
+
+Use historical supervisor outcomes to evaluate:
+
+* hypothetical alert reduction,
+* retention of important cases,
+* false-negative risk,
+* rule-specific performance,
+* entity-specific performance,
+* confidence,
+* abstention,
+* and stability.
+
+Do not recommend production suppression until the evidence supports it and the necessary controls are identified.
+
+---
+
+# 16. Alternative Solutions Must Be Explored
+
+Do not force the final solution to be agentic.
+
+After analysing the data, compare multiple possible architectures.
+
+For example:
+
+### Option 1
+
+Pure anomaly detection
+
+### Option 2
+
+Rule + ML prioritization
+
+### Option 3
+
+Rule calibration using ML
+
+### Option 4
+
+Rule + ML actionability model
+
+### Option 5
+
+Rule hit + ML + contextual retrieval
+
+### Option 6
+
+Rule hit + ML + GraphRAG + agent
+
+### Option 7
+
+Hybrid architecture combining several of the above
+
+For each option determine:
+
+* what problem it solves,
+* what data it requires,
+* whether our current data supports it,
+* expected benefit,
+* limitations,
+* explainability,
+* governance/control implications,
+* implementation complexity,
+* and whether it can actually reduce formal alert volume.
+
+Do not rank them as "best" or "worst".
+
+Instead identify the conditions under which each architecture makes sense.
+
+---
+
+# 17. Important Principle
+
+Do not jump from:
+
+```text
+50k alerts
+```
+
+to:
+
+```text
+LLM + GraphRAG + Agents
+```
+
+without establishing the intermediate evidence.
+
+The analysis should progressively answer:
+
+```text
+What is happening?
+        ↓
+Why are alerts being generated?
+        ↓
+Which alerts are BAU?
+        ↓
+What makes an alert unusual?
+        ↓
+What makes an alert actionable?
+        ↓
+What relationships exist between alerts?
+        ↓
+What context is useful?
+        ↓
+Can AI improve the existing process?
+        ↓
+Where exactly should AI enter the architecture?
+```
+
+---
+
+# 18. Expected Deliverables
+
+After analysing all provided files, produce the following.
+
+## Deliverable 1 — Current-State Understanding
+
+A clear reconstruction of the current system.
+
+## Deliverable 2 — Data Understanding
+
+Detailed analysis of the 50k alert dataset.
+
+## Deliverable 3 — Attribute Intelligence
+
+Consolidated interpretation of the existing attribute-analysis work.
+
+## Deliverable 4 — Rule Engine Understanding
+
+Reverse-engineered understanding of the existing rules and their execution flow.
+
+Clearly distinguish confirmed facts from assumptions.
+
+## Deliverable 5 — Problem Reformulation
+
+Clearly identify whether the real problem is:
+
+* anomaly detection,
+* alert reduction,
+* actionability prediction,
+* rule calibration,
+* contextual investigation,
+* alert prioritization,
+* or a combination.
+
+## Deliverable 6 — Feasibility Analysis
+
+Evaluate:
+
+* episodic linking,
+* anomaly detection,
+* actionability modelling,
+* graph representation,
+* GraphRAG,
+* agentic reasoning,
+* deterministic decision policy.
+
+## Deliverable 7 — Candidate Architectures
+
+Produce several viable architectures based on the evidence.
+
+## Deliverable 8 — Recommended Direction
+
+Do not simply say "use agents."
+
+Explain which combination of techniques is actually justified by the data and architecture.
+
+## Deliverable 9 — Experiment Plan
+
+Define the experiments required before production implementation.
+
+For example:
+
+```text
+Dataset validation
+        ↓
+Feature engineering
+        ↓
+Episodic linking experiment
+        ↓
+Unsupervised anomaly experiment
+        ↓
+Historical actionability experiment
+        ↓
+Graph/context experiment
+        ↓
+Agent reasoning experiment
+        ↓
+Shadow-mode evaluation
+```
+
+## Deliverable 10 — Open Questions
+
+Create a short list of questions that cannot be answered from the files and require:
+
+* business analysts,
+* SCP owners,
+* rule-engine owners,
+* data owners,
+* or architecture/security teams.
+
+---
+
+# 19. Rules for Your Analysis
+
+Follow these rules strictly.
+
+### Rule 1
+
+Do not invent missing information.
+
+### Rule 2
+
+Clearly distinguish:
+
+```text
+Observed from data
+Inferred
+Assumed
+Requires validation
+```
+
+### Rule 3
+
+Do not immediately implement anything.
+
+First understand.
+
+### Rule 4
+
+Do not introduce technologies merely because they are fashionable.
+
+For example:
+
+```text
+LLM
+GraphRAG
+Neo4j
+Qdrant
+Agents
+```
+
+must each have a demonstrated purpose.
+
+### Rule 5
+
+Do not assume anomaly = bad alert.
+
+### Rule 6
+
+Do not use post-alert information as a real-time prediction feature if that information would not exist at prediction time.
+
+### Rule 7
+
+Do not allow an LLM to become an uncontrolled regulatory decision-maker.
+
+### Rule 8
+
+Preserve the deterministic rule engine as an important source of evidence/control.
+
+### Rule 9
+
+Treat the existing solution document as a baseline that should be evaluated and strengthened rather than blindly replaced.
+
+### Rule 10
+
+Before proposing implementation, identify the smallest experiment that can validate the architectural hypothesis.
+
+---
+
+# 20. Final Goal
+
+The ultimate goal is to arrive at a defensible answer to this question:
+
+> **Given the existing deterministic SCP rule engine, approximately 50k historical alerts, the available rule definitions, the existing attribute analysis, and the current solution proposal, what is the most technically and operationally credible way to use AI/ML and potentially agentic AI to reduce unnecessary supervisory workload and, if governance permits, reduce the number of formal alerts generated — without compromising meaningful surveillance coverage or auditability?**
+
+Do not assume the answer is already known.
+
+**Discover it from the data and existing system first.**
+
+Start by analysing the provided files and building the current-state understanding.
+
+**Do not write production code yet.**
+
+The first output should be a structured **Discovery & Feasibility Analysis**, followed by proposed experiments and candidate architectures.
+
+Only after this analysis is reviewed should implementation begin.
