@@ -1,1001 +1,720 @@
-# SCP Intelligent Alert Reduction & Investigation System
+# SCP Alert Intelligence / Triage System — Implementation Plan
 
-## Master Discovery, Feasibility Analysis & Solution Design Prompt
-
-You are acting as a **Senior AI/ML Architect and Financial Surveillance Systems Architect**.
-
-Your task is **NOT to immediately implement a solution**.
-
-Your first responsibility is to deeply understand the existing SCP alert-generation ecosystem, the available datasets, the existing rule logic, the existing solution approach, and the business constraints.
-
-Only after building that understanding should you determine whether the previously discussed AI/ML/Agentic approaches are feasible, which approaches are appropriate, and how the problem should ultimately be solved.
+**Status:** Draft v1
+**Source of truth:** The project specification pasted by the author. Where this plan
+adds judgement beyond that source, the section is marked **[PLAN NOTE]**.
+**Scope:** Turn existing work (feature engineering + four trained unsupervised models)
+into a coherent, auditable pipeline ending in a supervisor-facing explanation.
 
 ---
 
-# 1. Business Problem
+## 0. Framing
 
-We are working with a financial-trade surveillance / Supervisory Control Portal (SCP) use case.
+### 0.1 What this system claims
 
-The current high-level flow is understood to be approximately:
+The ML layer identifies **behavioural unusualness relative to the historical alert
+population**. It does not claim:
 
-```text
-Upstream Trading Systems
-        ↓
-Data Ingestion / Processing
-        ↓
-Existing Deterministic Rules
-        ↓
-SCP Alerts
-        ↓
-Supervisor Review
-        ↓
-Signoff / RFI / Other Action
-```
+- anomaly = risk
+- anomaly = misconduct
+- anomaly = non-BAU
 
-The existing deterministic rule engine is already operational and is considered by business stakeholders to be functioning reasonably well.
+The final decision remains with the supervisor.
 
-However, it generates a significant number of alerts that require manual supervisory review.
+### 0.2 The seven questions the system must answer
 
-The approximate historical dataset available to us contains around **50,000 generated alerts** with a large number of attributes.
+For any alert:
 
-The business objective is to investigate whether AI/ML and agentic techniques can:
+1. How anomalous is this alert according to each model?
+2. Do the different models agree?
+3. What is the unified/consensus anomaly score?
+4. Which features contributed to the anomalous result?
+5. What related alerts belong to the same episode?
+6. What contextual relationships exist in the graph?
+7. Can GraphRAG combine these into a useful explanation for a supervisor?
 
-* reduce unnecessary formal alert generation where appropriate,
-* reduce BAU / low-value alert volume,
-* reduce supervisory investigation effort,
-* identify genuinely unusual behaviour,
-* provide contextual evidence around rule hits,
-* improve alert prioritization and actionability,
-* connect related alerts/trades/entities,
-* and provide explainable reasoning for why an alert should or should not receive further attention.
+### 0.3 Separation of responsibilities (non-negotiable)
 
-There is an important business/control constraint:
+| Layer | Question it answers | What it must NOT do |
+|---|---|---|
+| Episodic linking | Which alerts are related? | Use anomaly scores or outcome labels to form episodes |
+| ML models | How behaviourally unusual is this alert? | Operate on leaked post-review fields |
+| Consensus | Do multiple detectors agree on unusualness? | Hide model disagreement |
+| XAI | Which features contributed to the model output? | Claim causality |
+| GraphDB | How are alerts, episodes and entities connected? | Contain invented relationships |
+| GraphRAG | What contextual evidence can we retrieve? | Act as the anomaly detector |
+| LLM | How do we present retrieved evidence? | Invent scores, features, relationships or episode membership |
 
-> Once an official SCP alert is generated, the supervisor is expected to review it.
+### 0.4 Scoring unit
 
-Therefore, **do not assume that an AI system is allowed to suppress or close an official alert**.
+The primary scoring unit is the **alert**, not the episode. An episode may contain
+normal alerts, anomalous alerts, or both. Episode-level anomaly scores must **not** be
+produced by averaging member alert scores. The episode supplies context around the
+alert.
 
-Instead, determine from the actual system architecture whether there is a meaningful intermediate concept such as:
-
-```text
-Rule Evaluation
-      ↓
-Rule Hit / Candidate
-      ↓
-Alert Creation
-```
-
-If such a candidate stage exists, investigate whether an intelligence layer could safely operate there.
-
-If it does not exist, explicitly identify that limitation.
+**[PLAN NOTE]** An episode-level signal is still useful, but it must be a separately
+defined and separately justified quantity (e.g. count and share of member alerts in the
+Top 5% band, episode cohesion, episode duration vs. historical episodes of the same
+type). Treat it as descriptive context, not as a second anomaly model, unless and until
+it is explicitly designed as one.
 
 ---
 
-# 2. Available Inputs
+## 1. Target architecture
 
-The following files/data sources will be available on the office machine.
-
-## Dataset 1 — GR CAL EXPORT.xlsx
-
-This contains approximately **50k historical SCP alerts generated after the existing rule engine**.
-
-Perform a comprehensive analysis of:
-
-* number of records,
-* columns,
-* data types,
-* missing values,
-* unique values,
-* cardinality,
-* categorical distributions,
-* numerical distributions,
-* temporal coverage,
-* duplicate records,
-* potential identifiers,
-* rule-related attributes,
-* entity-related attributes,
-* trade-related attributes,
-* alert-related attributes,
-* supervisor/action-related attributes,
-* comments/signoff/RFI information,
-* and any other useful fields.
-
-Do NOT assume that the dataset is unlabeled simply because it does not contain an explicit ML label.
-
-Investigate whether historical supervisor outcomes can potentially act as:
-
-```text
-historical outcome / target
 ```
-
-while ensuring that post-alert information is not incorrectly used as an input feature for a prediction that is supposed to occur before alert creation.
-
----
-
-# 3. Dataset 2 — GR CAL Attribute Analysis Pack.xlsx
-
-This file contains existing analysis performed on the attributes for different layers of the proposed solution, including areas such as:
-
-* episodic linking,
-* attribute relationships,
-* behavioural patterns,
-* alert relationships,
-* and potentially other analytical layers.
-
-Study this file carefully.
-
-Do NOT redo analysis blindly.
-
-Instead:
-
-1. Understand what has already been investigated.
-2. Identify conclusions already established.
-3. Identify assumptions behind those conclusions.
-4. Identify useful features already discovered.
-5. Identify gaps.
-6. Identify contradictory findings.
-7. Identify analyses that should be validated using the 50k dataset.
-8. Identify which attributes appear useful for:
-
-   * episodic linking,
-   * anomaly detection,
-   * actionability prediction,
-   * contextual retrieval,
-   * explainability,
-   * and agent reasoning.
-
----
-
-# 4. Existing Rule Implementation Files
-
-There are also Excel files containing records of rules implemented on data received from upstream systems.
-
-Some of these rules are written in a language that resembles SQL but is **not necessarily standard SQL**.
-
-Treat these files as extremely important.
-
-Your objective is to reverse-engineer the existing rule ecosystem.
-
-For each rule or rule family, determine where possible:
-
-* rule identifier,
-* rule description,
-* source system,
-* input attributes,
-* conditions,
-* thresholds,
-* joins/relationships,
-* time windows,
-* aggregation logic,
-* output,
-* alert type,
-* dependencies,
-* and downstream effect.
-
-Do NOT assume that the syntax is SQL.
-
-First determine what language/DSL/pattern it actually resembles.
-
-If the semantics cannot be confidently determined, explicitly mark them as:
-
-```text
-UNKNOWN / REQUIRES DOMAIN VALIDATION
-```
-
-Do not invent interpretations.
-
-Most importantly, determine whether the existing architecture has a conceptual distinction between:
-
-```text
-Rule condition matched
-```
-
-and
-
-```text
-Official SCP alert created
-```
-
-This distinction is critical to the proposed AI architecture.
-
----
-
-# 5. Existing Solution Approach
-
-There is also a document describing the current version of the proposed solution.
-
-Read it completely.
-
-Understand:
-
-* current problem definition,
-* current architecture,
-* proposed components,
-* current assumptions,
-* current ML approach,
-* episodic linking approach,
-* explainability approach,
-* agentic approach,
-* data flow,
-* expected outputs,
-* and any limitations.
-
-Do not silently replace the current solution.
-
-Instead, treat it as the **baseline proposal** that we are now evaluating and strengthening.
-
----
-
-# 6. First Objective — Build a Strong Understanding
-
-Before proposing any new architecture, create a consolidated understanding of the system.
-
-Produce a concise but technically deep analysis covering:
-
-### A. Current system
-
-```text
-Upstream Systems
-      ↓
-Data Processing
-      ↓
-Existing Rules
-      ↓
-Alert Generation
-      ↓
-SCP
-      ↓
-Supervisor
-```
-
-Replace this conceptual flow with the **actual flow discovered from the provided files**.
-
-### B. Data understanding
-
-Explain:
-
-* what one row represents,
-* what an alert represents,
-* important entities,
-* important relationships,
-* important timestamps,
-* important rule attributes,
-* important supervisor/action attributes.
-
-### C. Rule understanding
-
-Build a conceptual map of:
-
-```text
-Upstream Data
-     ↓
-Rule Inputs
-     ↓
-Rule Evaluation
-     ↓
-Rule Hit
-     ↓
-Alert Creation
-```
-
-Clearly identify which stages are confirmed versus inferred.
-
-### D. Historical outcome understanding
-
-Determine what happened to historical alerts.
-
-For example:
-
-```text
-Alert
- ↓
-RFI?
- ↓
-Signoff?
- ↓
-Comments?
- ↓
-Escalation?
-```
-
-Determine whether these outcomes can be transformed into reliable historical targets.
-
----
-
-# 7. Identify the Actual Optimization Problem
-
-Do not assume that the problem is simply:
-
-> "Detect anomalies."
-
-Investigate which of the following problems we actually have:
-
-### Problem A — Alert prioritization
-
-```text
-Rule
- ↓
-Alert
- ↓
-ML
- ↓
-Priority
- ↓
-Supervisor
-```
-
-This does not reduce official alert volume but may reduce supervisory effort.
-
-### Problem B — Behavioural anomaly detection
-
-```text
-Trade / Alert
- ↓
-ML
- ↓
-Novelty / Anomaly Score
-```
-
-Determine whether this can identify behaviour that is unusual relative to historical behaviour.
-
-### Problem C — Actionability prediction
-
-Investigate whether historical supervisor outcomes can answer:
-
-> "Which rule hits historically required meaningful supervisory attention?"
-
-Potential targets could include RFI, escalation, investigation outcome, or other validated business outcomes.
-
-Do not assume these are automatically good labels.
-
-### Problem D — Intelligent rule calibration
-
-Investigate whether historical behaviour can help improve:
-
-* thresholds,
-* time windows,
-* parameters,
-* rule combinations,
-* or rule applicability.
-
-### Problem E — Pre-alert contextual adjudication
-
-Investigate whether the architecture permits:
-
-```text
-Rule Hit
-   ↓
-ML + Context
-   ↓
-Agent
-   ↓
-Deterministic Policy
-   ↓
-Formal Alert
-```
-
-This is the most important architectural question.
-
----
-
-# 8. Discussed AI/ML Approach
-
-The following approaches have been discussed and should now be treated as hypotheses to evaluate — **not predetermined solutions**.
-
-## 8.1 Episodic Linking
-
-Investigate whether alerts can be grouped into meaningful episodes using:
-
-* entity,
-* trade,
-* instrument,
-* lifecycle,
-* time proximity,
-* desk,
-* venue,
-* rule relationships,
-* and other available attributes.
-
-Potential conceptual representation:
-
-```text
-Entity
-  │
-  ├── Trade
-  │     ├── Alert
-  │     └── Alert
-  │
-  └── Related Trade
-        └── Alert
-```
-
-Determine whether graph-based representation is actually useful.
-
-Do not introduce a graph database merely because GraphRAG is being considered.
-
-First prove the relationships.
-
----
-
-# 9. Unsupervised Behavioural Detection
-
-Evaluate the feasibility of:
-
-* Isolation Forest
-* Local Outlier Factor
-* Autoencoder
-* One-Class SVM
-
-The objective is not simply to produce four anomaly scores.
-
-Investigate:
-
-* what constitutes normal behaviour,
-* whether BAU dominates the dataset,
-* whether the feature space is suitable,
-* whether anomalies are global or local,
-* whether temporal behaviour matters,
-* whether rule-specific models are necessary,
-* whether entity-specific baselines are required,
-* and whether an ensemble actually provides additional value.
-
-The output should ideally become something conceptually like:
-
-```text
-Behavioural Novelty Score
-```
-
-rather than:
-
-```text
-Anomaly = Fraud
-```
-
-Do not equate statistical anomaly with regulatory relevance.
-
----
-
-# 10. Historical Actionability Modelling
-
-Investigate whether the 50k records contain sufficient historical outcome information to create a supervised or weakly supervised target.
-
-Example:
-
-```text
-Features available at T0
-        ↓
-Rule Hit
-        ↓
-Historical Supervisor Outcome
-        ↓
-Target
-```
-
-Potential targets may include:
-
-* RFI,
-* escalation,
-* meaningful investigation,
-* repeated investigation,
-* or other validated outcomes.
-
-Determine:
-
-1. whether the outcomes are sufficiently consistent,
-2. whether the labels are severely imbalanced,
-3. whether comments can be converted into structured categories,
-4. whether weak supervision is appropriate,
-5. whether supervised modelling is feasible.
-
-Explicitly distinguish:
-
-```text
-Feature available before decision
-```
-
-from
-
-```text
-Outcome observed after decision
-```
-
-to prevent leakage.
-
----
-
-# 11. Graph / GraphRAG Investigation
-
-Investigate whether a graph representation adds meaningful value.
-
-Potential nodes:
-
-```text
-Entity
-Trade
-Order
-Instrument
-Alert
-Rule
-Episode
-Desk
-Venue
-Time Window
-```
-
-Potential relationships:
-
-```text
-ENTITY → EXECUTED → TRADE
-TRADE → GENERATED → ALERT
-ALERT → TRIGGERED_BY → RULE
-ALERT → RELATED_TO → ALERT
-TRADE → PART_OF → EPISODE
-ENTITY → ASSOCIATED_WITH → ENTITY
-```
-
-Determine:
-
-* which relationships can actually be derived from the data,
-* which relationships are reliable,
-* which are speculative,
-* and whether graph traversal provides information that normal relational retrieval cannot.
-
-Only recommend Neo4j/Qdrant/GraphRAG if justified by the analysis.
-
----
-
-# 12. Agentic AI Investigation
-
-Evaluate the role of an AI agent.
-
-The agent should NOT automatically be assumed to be:
-
-* the anomaly detector,
-* the final decision-maker,
-* the rule engine,
-* the regulator-facing authority,
-* or the alert suppressor.
-
-Instead investigate the following role:
-
-```text
-Rule Hit
-   ↓
-Evidence Retrieval
-   ↓
-ML Scores
-   ↓
-Historical Alerts
-   ↓
-Episode / Graph Context
-   ↓
-Agent Reasoning
-   ↓
-Structured Assessment
-```
-
-Potential agent tools could include:
-
-```text
-get_rule_definition()
-get_trade_history()
-get_entity_history()
-get_previous_alerts()
-get_similar_alerts()
-get_episode()
-get_related_entities()
-get_market_context()
-get_previous_dispositions()
-```
-
-Determine which of these tools are actually feasible from the available data.
-
-The agent should produce evidence-backed structured output rather than unconstrained natural-language decisions.
-
----
-
-# 13. Critical Architectural Question
-
-Investigate this carefully:
-
-> **Does the existing system have a meaningful "rule hit / candidate" stage before an official SCP alert is created?**
-
-There are two possibilities.
-
-### Architecture A
-
-```text
-Rule Engine
-    ↓
-Rule Hit
-    ↓
-Alert Creation
-```
-
-If this exists, investigate:
-
-```text
-Rule Hit
-   ↓
-AI Intelligence Layer
-   ↓
-Deterministic Policy
-   ↓
-Formal Alert / Candidate
-```
-
-### Architecture B
-
-```text
-Rule Engine
-    ↓
-Official SCP Alert
-```
-
-If this is the actual architecture, do NOT pretend an AI gate can simply be inserted.
-
-Instead investigate alternatives:
-
-* rule calibration,
-* shadow scoring,
-* alert prioritization,
-* post-alert investigation,
-* or whether a candidate abstraction could be introduced.
-
----
-
-# 14. Proposed Hybrid Architecture to Evaluate
-
-Use the following as a **candidate architecture**, not as a requirement:
-
-```text
-                  EXISTING RULE ENGINE
-                          │
-                          ▼
-                       RULE HIT
-                          │
-             ┌────────────┴────────────┐
-             │                         │
-             ▼                         ▼
-      ML Behavioural              Context / Graph
-          Score                    Retrieval
-             │                         │
-             │                         ▼
-             │                   Historical Context
-             │                         │
-             └────────────┬────────────┘
-                          ▼
-                    Agent Reasoning
-                          │
-                          ▼
-                 Structured Assessment
-                          │
-                          ▼
-                 Deterministic Policy
-                    /           \
-                   /             \
-                  ▼               ▼
-          FORMAL ALERT       RETAIN CANDIDATE
-                  │
-                  ▼
-              SUPERVISOR
-```
-
-Evaluate this architecture objectively.
-
-Do not assume it is correct.
-
-Determine:
-
-* which components are feasible now,
-* which require additional data,
-* which require changes to the existing system,
-* which require business approval,
-* which introduce operational risk,
-* and which should remain future-state.
-
----
-
-# 15. Shadow Mode Must Be Considered
-
-Because official SCP alerts currently require supervisory review, investigate a shadow-mode implementation first:
-
-```text
-Existing Production Flow
-        │
-        └──────────────→ Official Alert → Supervisor
-        │
-        ▼
- AI Shadow Pipeline
-        │
-        ├── ML score
-        ├── Retrieval
-        ├── Agent reasoning
-        └── Hypothetical decision
-```
-
-Use historical supervisor outcomes to evaluate:
-
-* hypothetical alert reduction,
-* retention of important cases,
-* false-negative risk,
-* rule-specific performance,
-* entity-specific performance,
-* confidence,
-* abstention,
-* and stability.
-
-Do not recommend production suppression until the evidence supports it and the necessary controls are identified.
-
----
-
-# 16. Alternative Solutions Must Be Explored
-
-Do not force the final solution to be agentic.
-
-After analysing the data, compare multiple possible architectures.
-
-For example:
-
-### Option 1
-
-Pure anomaly detection
-
-### Option 2
-
-Rule + ML prioritization
-
-### Option 3
-
-Rule calibration using ML
-
-### Option 4
-
-Rule + ML actionability model
-
-### Option 5
-
-Rule hit + ML + contextual retrieval
-
-### Option 6
-
-Rule hit + ML + GraphRAG + agent
-
-### Option 7
-
-Hybrid architecture combining several of the above
-
-For each option determine:
-
-* what problem it solves,
-* what data it requires,
-* whether our current data supports it,
-* expected benefit,
-* limitations,
-* explainability,
-* governance/control implications,
-* implementation complexity,
-* and whether it can actually reduce formal alert volume.
-
-Do not rank them as "best" or "worst".
-
-Instead identify the conditions under which each architecture makes sense.
-
----
-
-# 17. Important Principle
-
-Do not jump from:
-
-```text
-50k alerts
-```
-
-to:
-
-```text
-LLM + GraphRAG + Agents
-```
-
-without establishing the intermediate evidence.
-
-The analysis should progressively answer:
-
-```text
-What is happening?
-        ↓
-Why are alerts being generated?
-        ↓
-Which alerts are BAU?
-        ↓
-What makes an alert unusual?
-        ↓
-What makes an alert actionable?
-        ↓
-What relationships exist between alerts?
-        ↓
-What context is useful?
-        ↓
-Can AI improve the existing process?
-        ↓
-Where exactly should AI enter the architecture?
+ALERT DATA
+    -> EPISODIC LINKING            -> episode_id
+    -> FEATURE ENGINEERING         -> FEATURE AUDIT -> validated feature set
+    -> IF | LOF | AE | OCSVM       -> raw model scores
+    -> SCORE DIRECTION FIX
+    -> PERCENTILE NORMALIZATION    -> common 0-100 scale
+    -> CONSENSUS ANOMALY SCORE     -> model agreement + alert ranking
+    -> MODEL-SPECIFIC XAI          -> feature evidence
+    -> GRAPHDB                     -> Alert | Episode | Entities
+    -> GRAPHRAG                    -> contextual explanation
+    -> SCP ASSISTANT               -> SUPERVISOR
 ```
 
 ---
 
-# 18. Expected Deliverables
+## 2. Phase plan
 
-After analysing all provided files, produce the following.
+Phases run in order. Each phase lists its objective, tasks, deliverables and an exit
+criterion. Do not start a phase before its predecessor's exit criterion is met.
 
-## Deliverable 1 — Current-State Understanding
+### PHASE 1 — Audit the existing implementation
 
-A clear reconstruction of the current system.
+**Objective:** Understand what exists before changing anything. Do not rewrite, do not
+retrain, do not discard work because it is imperfect.
 
-## Deliverable 2 — Data Understanding
+**Inspect:**
 
-Detailed analysis of the 50k alert dataset.
+- project structure
+- feature-engineering code
+- preprocessing code
+- trained model artefacts
+- model scoring code
+- episodic-linking code
+- current output files
+- existing XAI implementation
+- existing GraphDB code
+- existing GraphRAG implementation
 
-## Deliverable 3 — Attribute Intelligence
+**Deliverable: Existing Implementation Audit**, answering:
 
-Consolidated interpretation of the existing attribute-analysis work.
+| ID | Question |
+|---|---|
+| A | What feature engineering has already been performed? |
+| B | What features are currently fed into the models? |
+| C | Which features are numerical / categorical / temporal / episode-derived / identifiers / potentially leakage-prone? |
+| D | What preprocessing is applied? |
+| E | Which four models have actually been trained? |
+| F | What exact scoring function is used for each model? |
+| G | What does a higher/lower score mean for each model? |
+| H | What preprocessing does each model require? |
+| I | How are current model outputs stored? |
+| J | Is episodic linking implemented? |
+| K | What episode-level features exist? |
+| L | Is GraphDB implemented? |
+| M | Is GraphRAG implemented? |
+| N | What XAI methods are implemented? |
 
-## Deliverable 4 — Rule Engine Understanding
-
-Reverse-engineered understanding of the existing rules and their execution flow.
-
-Clearly distinguish confirmed facts from assumptions.
-
-## Deliverable 5 — Problem Reformulation
-
-Clearly identify whether the real problem is:
-
-* anomaly detection,
-* alert reduction,
-* actionability prediction,
-* rule calibration,
-* contextual investigation,
-* alert prioritization,
-* or a combination.
-
-## Deliverable 6 — Feasibility Analysis
-
-Evaluate:
-
-* episodic linking,
-* anomaly detection,
-* actionability modelling,
-* graph representation,
-* GraphRAG,
-* agentic reasoning,
-* deterministic decision policy.
-
-## Deliverable 7 — Candidate Architectures
-
-Produce several viable architectures based on the evidence.
-
-## Deliverable 8 — Recommended Direction
-
-Do not simply say "use agents."
-
-Explain which combination of techniques is actually justified by the data and architecture.
-
-## Deliverable 9 — Experiment Plan
-
-Define the experiments required before production implementation.
-
-For example:
-
-```text
-Dataset validation
-        ↓
-Feature engineering
-        ↓
-Episodic linking experiment
-        ↓
-Unsupervised anomaly experiment
-        ↓
-Historical actionability experiment
-        ↓
-Graph/context experiment
-        ↓
-Agent reasoning experiment
-        ↓
-Shadow-mode evaluation
-```
-
-## Deliverable 10 — Open Questions
-
-Create a short list of questions that cannot be answered from the files and require:
-
-* business analysts,
-* SCP owners,
-* rule-engine owners,
-* data owners,
-* or architecture/security teams.
+**Exit criterion:** Every question A–N answered with a file/function reference, not a
+guess. Unknowns are recorded as unknown rather than assumed.
 
 ---
 
-# 19. Rules for Your Analysis
+### PHASE 2 — Feature engineering audit and validation
 
-Follow these rules strictly.
+**Objective:** Establish that the feature matrix represents **behaviour available at the
+time the alert was generated**. The objective is not to maximise feature count.
 
-### Rule 1
+**2.1 Per-feature validation table**
 
-Do not invent missing information.
+Produce one row per feature:
 
-### Rule 2
-
-Clearly distinguish:
-
-```text
-Observed from data
-Inferred
-Assumed
-Requires validation
+```
+feature
+feature_type
+source_column(s)
+calculation
+missing_percentage
+unique_count
+variance
+range
+outlier_percentage
+distribution_summary
+prediction_time_available
+possible_leakage
+redundancy/correlation
+model_compatibility
+recommendation        # KEEP | MODIFY | REMOVE | INVESTIGATE
+rationale
 ```
 
-### Rule 3
+No feature is removed automatically. Every KEEP and every REMOVE carries a written
+reason.
 
-Do not immediately implement anything.
+**2.2 Fields requiring particular scrutiny**
 
-First understand.
+These may be valuable for analysis or for GraphDB, but must not silently become ML
+features:
 
-### Rule 4
+- alert IDs, trade IDs, account IDs, supervisor IDs, rule IDs, episode IDs
+- timestamps
+- post-review fields
+- sign-off fields
+- RFI fields
+- supervisor comments
+- closure status
+- any field created after the alert was generated
 
-Do not introduce technologies merely because they are fashionable.
+**[PLAN NOTE] Routing confound.** Supervisors have hierarchy and specialisation, so
+alert routing is imbalanced and supervisor identity correlates with alert type. If
+supervisor or GPN is used as a model feature, the models can learn "alerts routed here
+are unusual", which is a property of the org chart rather than of behaviour. Default
+position: supervisor and GPN are **linking keys and graph nodes, not model features**.
+If they are retained as features, the audit must state why.
 
-For example:
+**2.3 Redundancy and correlation analysis**
 
-```text
-LLM
-GraphRAG
-Neo4j
-Qdrant
-Agents
-```
+Perform:
 
-must each have a demonstrated purpose.
+- Pearson correlation where appropriate
+- Spearman correlation where appropriate
+- categorical association where appropriate
+- near-zero variance analysis
+- duplicate/redundant feature analysis
 
-### Rule 5
+For each strongly correlated group, answer:
 
-Do not assume anomaly = bad alert.
+1. Which features are strongly correlated?
+2. Do they represent genuinely different business concepts?
+3. Could simultaneous use overweight a particular behaviour?
+4. Is dimensionality reduction or selective removal justified?
 
-### Rule 6
+Correlated features are **not** removed blindly — anomaly models can benefit from
+multiple related behavioural signals.
 
-Do not use post-alert information as a real-time prediction feature if that information would not exist at prediction time.
+**2.4 Distribution artefacts**
 
-### Rule 7
+Generate: histograms/distributions, boxplots where useful, correlation matrix,
+missingness summary, feature variance summary.
 
-Do not allow an LLM to become an uncontrolled regulatory decision-maker.
+**2.5 Alert-level vs episode-level features**
 
-### Rule 8
+Maintain an explicit split:
 
-Preserve the deterministic rule engine as an important source of evidence/control.
+- **Alert-level features** — derived from the alert itself.
+- **Episode-level features** — e.g. `episode_alert_count`, `episode_duration`, number of
+  related alerts, activity frequency within episode, distinct entity count, temporal
+  density, operation/action count, historical episode characteristics.
 
-### Rule 9
+**2.6 Temporal leakage rule**
 
-Treat the existing solution document as a baseline that should be evaluated and strengthened rather than blindly replaced.
+If Alert A occurs at T1 and Alert B at T2 > T1, features for Alert A must not use
+information from B. Every episode-derived feature must be computable from data known at
+the alert's own timestamp.
 
-### Rule 10
+Label every feature as either:
 
-Before proposing implementation, identify the smallest experiment that can validate the architectural hypothesis.
+- **REAL-TIME AVAILABLE** — usable in the production scoring path
+- **RETROSPECTIVE ONLY** — usable for analysis and reporting, not for scoring
+
+**[PLAN NOTE]** Most naive episode features (`episode_alert_count`, `episode_duration`)
+are retrospective by construction, because the episode is not complete when its first
+alert arrives. The fix is to define them as-of the alert timestamp — e.g. "number of
+prior linked alerts in the 30 days before this alert" rather than "size of the episode
+this alert ended up in". Expect to rewrite several features here.
+
+**Deliverables:** Feature Engineering Validation Report; validated feature matrix;
+real-time vs retrospective feature register.
+
+**Exit criterion:** Every feature carries a recommendation and a leakage verdict, and
+the feature matrix used for scoring contains no RETROSPECTIVE ONLY feature.
 
 ---
 
-# 20. Final Goal
+### PHASE 3 — Audit the four models and their scoring functions
 
-The ultimate goal is to arrive at a defensible answer to this question:
+**Objective:** Know exactly what each trained model outputs before consuming it.
 
-> **Given the existing deterministic SCP rule engine, approximately 50k historical alerts, the available rule definitions, the existing attribute analysis, and the current solution proposal, what is the most technically and operationally credible way to use AI/ML and potentially agentic AI to reduce unnecessary supervisory workload and, if governance permits, reduce the number of formal alerts generated — without compromising meaningful surveillance coverage or auditability?**
+The four models and their definitions of unusualness:
 
-Do not assume the answer is already known.
+| Model | Definition of unusualness |
+|---|---|
+| Isolation Forest | Isolates observations through recursive/random partitioning |
+| Local Outlier Factor | Evaluates local density relative to neighbouring observations |
+| Autoencoder | Reconstructs normal patterns; reconstruction error is the signal |
+| One-Class SVM | Learns a boundary around the distribution; outside = anomalous |
 
-**Discover it from the data and existing system first.**
+For each model record:
 
-Start by analysing the provided files and building the current-state understanding.
+- raw score and its exact scoring function
+- score direction (does higher or lower mean more anomalous?)
+- score distribution and range
+- required preprocessing (scaling, encoding) and whether it matches Phase 2 output
 
-**Do not write production code yet.**
+**Critical fact:** raw scores across these four models are **not directly comparable**.
+Nothing downstream may compare or combine raw scores.
 
-The first output should be a structured **Discovery & Feasibility Analysis**, followed by proposed experiments and candidate architectures.
+**Exit criterion:** A signed-off table of the four scoring functions and directions.
 
-Only after this analysis is reviewed should implementation begin.
+---
+
+### PHASE 4 — Generate raw scores for all alerts
+
+Run all four models over the validated feature matrix. Persist raw scores alongside
+`alert_id`. No transformation at this stage.
+
+**Deliverable:** Raw Model Score Table.
+
+---
+
+### PHASE 5 — Common score representation
+
+**Objective:** Put all four models on one anomaly-oriented scale. This is one of the
+most important parts of the implementation.
+
+Per model:
+
+```
+raw model score
+    -> correct score direction (so that higher = more anomalous)
+    -> rank / percentile
+    -> 0-100 anomaly scale
+```
+
+Interpretation:
+
+- `0` = relatively normal compared with the evaluated population
+- `100` = relatively highly anomalous compared with the evaluated population
+
+This is **not a probability**.
+
+Example (normalized percentiles, not raw scores):
+
+```
+Alert A:  IF = 97   LOF = 94   AE = 96   OCSVM = 92
+```
+
+**[PLAN NOTE]** Percentile normalisation is relative to the evaluated population, so the
+score answers "how unusual is this alert compared to this batch" rather than "how
+unusual in absolute terms". Two consequences to document and decide:
+
+1. Fix the reference population explicitly (full historical corpus vs. rolling window
+   vs. per-event-type cohort). Scores are not comparable across different reference
+   populations.
+2. For production scoring of new alerts, freeze the percentile mapping from a reference
+   run rather than recomputing ranks per batch, otherwise yesterday's 95th percentile is
+   not today's.
+
+**Deliverable:** Normalized Model Score Table.
+
+---
+
+### PHASE 6 — Consensus score and model agreement
+
+```
+consensus_anomaly_score = mean(IF_pct, LOF_pct, AE_pct, OCSVM_pct)
+
+model_agreement = standard deviation of the four normalized scores
+                  (low sd  = models agree
+                   high sd = models disagree)
+```
+
+Model disagreement must **not** be hidden.
+
+Worked examples:
+
+```
+Alert A:  IF 97  LOF 95  AE 96  OCSVM 94
+          consensus = 95.5   agreement = high   (strong multi-model evidence)
+
+Alert B:  IF 98  LOF 51  AE 47  OCSVM 55
+          consensus = 62.75  agreement = low    (models see this differently)
+```
+
+**Deliverables:** Consensus Anomaly Score Table; Model Agreement Analysis.
+
+---
+
+### PHASE 7 — Model comparison
+
+Calculate:
+
+- Spearman rank correlation between models
+- Pearson correlation where meaningful
+- Top 1% / Top 5% / Top 10% overlap
+- intersection of all four models
+- pairwise overlap
+
+**Deliverable:** Model Comparison Report answering "Are the four models identifying
+similar anomalous observations?" and "Where do they disagree?".
+
+**[PLAN NOTE]** This phase is also the evidence base for whether four models are
+warranted. If two models correlate above ~0.95 in rank and their top-K sets largely
+coincide, they are contributing one signal at twice the explanation cost. Record the
+finding; decide on model count after seeing it, not before.
+
+---
+
+### PHASE 8 — Ranking and banding (no forced binary label)
+
+Do **not** create an arbitrary `anomaly = score > 0.5`.
+
+Emit instead:
+
+- `consensus_anomaly_score`
+- `global_rank`
+- `percentile`
+- `percentile_band` ∈ {Top 1%, Top 5%, Top 10%, Normal range}
+
+A hard operational threshold is introduced only after the score distribution and its
+business meaning are understood.
+
+**Master alert-level output table:**
+
+```
+alert_id
+episode_id
+IF_raw_score,     IF_anomaly_percentile
+LOF_raw_score,    LOF_anomaly_percentile
+AE_raw_score,     AE_anomaly_percentile
+OCSVM_raw_score,  OCSVM_anomaly_percentile
+consensus_anomaly_score
+model_agreement
+global_rank
+percentile_band
+<validated feature set>
+```
+
+---
+
+### PHASE 9 — Model-specific XAI
+
+XAI has two separate purposes that must not be mixed:
+
+- **A. Model XAI** — "Why did the model consider this alert anomalous?"
+- **B. Graph/episode context** — "What is happening around this alert?"
+
+This phase covers A only.
+
+**9A. Isolation Forest — feature attribution (SHAP where technically appropriate)**
+
+Per selected high-anomaly alert, emit: `feature`, `feature_value`, `contribution`,
+`direction`. Rank by contribution.
+
+**9B. Autoencoder — reconstruction-error explanation**
+
+Per selected alert, emit: `original_value`, `reconstructed_value`, `absolute_error`,
+`squared_error`, `contribution_percentage`. Rank features by contribution to total
+reconstruction error.
+
+**This is not SHAP and must not be labelled SHAP.**
+
+**9C. LOF — local perturbation / sensitivity explanation**
+
+LOF is a local-density algorithm and has no native tree-style attribution. Procedure:
+
+1. Calculate original LOF score.
+2. Perturb one feature at a time toward a valid reference value.
+3. Recalculate the anomaly score.
+4. Measure the change.
+5. Rank features by score impact.
+
+Label the output explicitly as **"local perturbation-based explanation"**, not a causal
+explanation.
+
+**9D. One-Class SVM**
+
+Use an explanation method valid for the trained implementation. Where SHAP is
+technically valid, use it; otherwise use a model-agnostic local perturbation/sensitivity
+approach. Do not copy the Isolation Forest method across by assumption.
+
+**9E. Unified explanation object**
+
+Per selected high-anomaly alert:
+
+```
+Alert:                    A102
+Consensus anomaly score:  95.4
+Model agreement:          High
+Model evidence:
+    Isolation Forest   97 percentile
+    LOF                94 percentile
+    Autoencoder        96 percentile
+    One-Class SVM      95 percentile
+Top contributing behavioural features:
+    feature_1, feature_2, feature_3
+Model-specific evidence:
+    <per-model detail as above>
+```
+
+It must answer: how anomalous is the alert; do the models agree; which behavioural
+features contributed; which models give the strongest evidence; is the anomaly driven by
+one model or several.
+
+**[PLAN NOTE]** The top-contributing-features line is a summary across four differently
+derived attributions, which are not on a common scale. Define the aggregation rule
+explicitly (e.g. rank-vote across models, or attribute only from the highest-scoring
+model) and state the rule in the supervisor-facing output. Do not average raw
+attribution magnitudes across methods.
+
+**9F. Counterfactual explanations**
+
+Question answered: *"What minimal feature changes would move this observation toward the
+learned normal region?"*
+
+Not: "What should the trader have done?" Not: "This caused the suspicious behaviour."
+
+Required phrasing: *"According to the model, moving feature X toward the learned normal
+range would reduce the anomaly score."*
+
+Respect valid ranges, non-negative constraints, categorical constraints, and
+business-valid feature combinations. Generate for **selected alerts only**, not all 50K.
+
+**Deliverables:** Model-specific XAI results; counterfactual explanations for selected
+alerts.
+
+---
+
+### PHASE 10 — Episodic context integration
+
+Episodic linking is **not** an anomaly detector. Its purpose is to determine which alerts
+belong to the same underlying business/activity lifecycle.
+
+Illustration of one episode:
+
+```
+Alert A -> Cancel
+Alert B -> Amend
+Alert C -> Cancel
+Alert D -> Rebook
+Alert E -> Amend
+```
+
+**Permitted linking signals only:**
+
+- temporal proximity
+- common entity/account
+- common transaction/trade
+- rule/type relationship
+- operation/action relationship
+- relevant attribute similarity
+
+**Prohibited:** anomaly scores as linking input; ground-truth outcome labels as linking
+input.
+
+Use the existing implementation. If incomplete, audit before changing.
+
+Preserve per alert: `alert_id`, `episode_id`, episode metadata.
+
+**[PLAN NOTE] Unified linking score.** Where linking attributes are tiered
+(strong/moderate/weak) and applied across multiple sections, produce **one** unified
+weighted score rather than per-section episode sets, so an alert has a single
+`episode_id`. Recommended refinements:
+
+- Require at least one strong or moderate match before scoring; weak attributes alone
+  must not create a link.
+- Weight by match rarity rather than by hand, so a shared trade ID outweighs a shared
+  supervisor.
+- Block candidate pairs on strong keys before scoring, rather than scoring all pairs.
+- Apply a time window or decay.
+- Inspect the episode size distribution for chaining (A–B, B–C merging into one giant
+  episode); tighten the join threshold or use community detection if present.
+
+**[PLAN NOTE] Edge evidence schema.** Store on every alert–alert edge:
+`matched_attributes`, `tier`, `weight`, `contribution`, `link_type`, `total_score`,
+`threshold`. This is what makes episode formation explainable and preserves the
+per-section distinction (lifecycle vs transactional) as edge metadata rather than as
+separate graphs. Fix this schema before finalising the scoring weights — everything in
+Phase 12's episode explanation depends on it.
+
+**Deliverable:** Episode/Alert relationship table.
+
+---
+
+### PHASE 11 — GraphDB
+
+GraphDB is a separate contextual layer. The ML models determine anomalousness; the graph
+represents relationships. **Only create relationships supported by the dataset. Do not
+invent graph facts.**
+
+**Nodes:** Alert, Episode, Transaction/Trading Activity, Account/Entity, Rule, Operation,
+Supervisor, other relevant business entities.
+
+**Relationships:**
+
+```
+Alert       -PART_OF->          Episode
+Alert       -RELATED_TO->       Alert
+Alert       -TRIGGERED_BY->     Rule
+Alert       -ASSOCIATED_WITH->  Entity
+Episode     -CONTAINS->         Alert
+Transaction -GENERATED->        Alert
+```
+
+**ML results exposed as node properties:**
+
+```
+Alert A102
+    consensus_anomaly_score = 95.4
+    model_agreement         = 0.91
+    percentile_band         = Top 5%
+    PART_OF    -> Episode E42
+    RELATED_TO -> Alert A103, Alert A104
+```
+
+The graph must let us traverse:
+
+```
+ALERT -> ML SCORE -> XAI EVIDENCE -> EPISODE -> RELATED ALERTS -> ENTITIES / ACTIVITIES
+```
+
+**Deliverables:** GraphDB schema; populated GraphDB.
+
+---
+
+### PHASE 12 — Graph retrieval layer
+
+Expose ML + XAI + episode information through graph retrieval before building the
+conversational layer.
+
+**[PLAN NOTE]** Implement retrieval as a fixed set of parameterised queries, not
+free-form text-to-Cypher. Suggested starting set:
+
+| Query | Returns |
+|---|---|
+| `alert_evidence(alert_id)` | Scores, agreement, band, XAI evidence |
+| `episode_members(alert_id)` | Episode members with their own scores and bands |
+| `link_evidence(alert_a, alert_b)` | Matched attributes, tier, contributions, link type, score vs threshold |
+| `episode_formation(episode_id)` | Shared attributes, time span, cohesion, weakest link |
+| `related_history(entity, window)` | Prior alerts for the entity, restricted to timestamps earlier than the current alert |
+
+`related_history` must filter to **earlier** alerts only, so no future information
+reaches a current alert's context.
+
+**[PLAN NOTE] Episode-level explainability.** Alongside the anomaly explanation, expose a
+separate grouping explanation at three levels: why two alerts are linked (edge
+evidence); why this alert sits in this episode (strongest link, link count, and the
+counterfactual "without attribute X this alert falls below threshold"); how the episode
+formed (shared attributes, time span, cohesion, weakest bridging link). Add an
+**episode confidence** value derived from cohesion, minimum edge strength and share of
+strong evidence, and display it beside — never merged with — the anomaly score. These
+answer different questions and must stay visually distinct in the supervisor UI.
+
+---
+
+### PHASE 13 — GraphRAG and supervisor-facing explanation
+
+**Pipeline:**
+
+```
+Supervisor question
+    -> question interpretation
+    -> graph retrieval / Cypher
+    -> relevant alert/episode/entity evidence
+    -> retrieve ML score + XAI evidence
+    -> context assembly
+    -> LLM
+    -> evidence-grounded response
+```
+
+**Worked retrievals:**
+
+| Question | Retrieve |
+|---|---|
+| "Why is Alert A102 highly anomalous?" | A102; consensus score; four model scores; model agreement; XAI feature contributions; episode ID; related alerts; episode characteristics; connected entities |
+| "Which alerts are related to A102?" | Graph relationships and episode membership |
+| "What makes this episode unusual?" | Episode members; individual anomaly scores; anomalous alert count; episode features; related entities; temporal relationships |
+
+**Hard constraint:** the LLM must not invent anomaly scores, feature values,
+relationships, episode membership or model outputs. Every answer is grounded in
+retrieved evidence. All explanation content is computed upstream and stored; the LLM
+only renders it.
+
+**Deliverables:** GraphRAG retrieval pipeline; example supervisor questions with grounded
+answers; final supervisor-facing explanation format.
+
+---
+
+## 3. Deliverables checklist
+
+| # | Deliverable | Phase |
+|---|---|---|
+| 1 | Feature Engineering Validation Report | 2 |
+| 2 | Feature matrix used by the models | 2 |
+| 3 | Four Model Evaluation Report | 3 |
+| 4 | Raw Model Score Table | 4 |
+| 5 | Normalized Model Score Table | 5 |
+| 6 | Consensus Anomaly Score Table | 6 |
+| 7 | Model Agreement Analysis | 6 |
+| 8 | Top-K Model Overlap Analysis | 7 |
+| 9 | Model-specific XAI results | 9 |
+| 10 | Counterfactual explanations for selected alerts | 9 |
+| 11 | Episode/Alert relationship table | 10 |
+| 12 | GraphDB schema | 11 |
+| 13 | Populated GraphDB | 11 |
+| 14 | GraphRAG retrieval pipeline | 13 |
+| 15 | Example supervisor questions and grounded answers | 13 |
+| 16 | Final end-to-end architecture diagram | 13 |
+| 17 | Terminology explainer (see §4) | 13 |
+
+---
+
+## 4. Terminology the final output must distinguish
+
+| Term | Meaning |
+|---|---|
+| Anomaly score | One model's view of how unusual an alert is, on the 0–100 percentile scale |
+| Consensus score | Mean of the four normalized percentiles |
+| Model agreement | Standard deviation of the four normalized scores; low sd = agreement |
+| XAI | Which features contributed to a model's anomalous output |
+| Episodic linking | Which alerts belong to the same business/activity lifecycle |
+| GraphDB | How alerts, episodes and entities are connected |
+| GraphRAG | Retrieval of graph + ML + XAI evidence to answer a supervisor's question |
+
+---
+
+## 5. Acceptance test
+
+The system is not accepted because the code runs. It is accepted when, for a given
+alert, it can answer in one grounded response:
+
+> Why did the system consider this particular alert unusual, how strongly do the four
+> models agree, what features contributed to the result, what other alerts are related to
+> it, what episode does it belong to, and what contextual evidence can we retrieve for
+> the supervisor?
+
+---
+
+## 6. Open decisions
+
+These are unresolved and block later phases. Record the decision and its date when made.
+
+| # | Decision | Blocks | Owner |
+|---|---|---|---|
+| 1 | Reference population for percentile normalisation (full corpus / rolling window / per-event-type cohort) | Phase 5 | |
+| 2 | Frozen vs recomputed percentile mapping for new alerts | Phase 5, production scoring | |
+| 3 | Whether supervisor/GPN are model features or linking keys only | Phase 2 | |
+| 4 | Aggregation rule for cross-model "top contributing features" | Phase 9E | |
+| 5 | Whether four models are retained after the Phase 7 overlap evidence | Phase 7 | |
+| 6 | Definition of episode-level signal (descriptive context vs scored quantity) | Phase 10, 12 | |
+| 7 | Approved LLM deployment for the GraphRAG layer | Phase 13 | |
+| 8 | Graph database choice (prototype in-memory vs property graph) | Phase 11 | |
+| 9 | Whether supervisors review related alerts together today — determines whether episode-level output is actionable in their workflow | Phase 12, 13 | |
+
+---
+
+## 7. Standing rules
+
+1. Do not skip the feature-engineering audit because features already exist.
+2. Do not retrain models before understanding their current results.
+3. Do not discard existing work because it is imperfect.
+4. Do not use anomaly scores or outcome labels to create episodes.
+5. Do not force a binary anomaly label early.
+6. Do not average alert scores into an episode anomaly score.
+7. Do not let the LLM or GraphRAG act as the anomaly detector.
+8. Do not present anomaly as equivalent to risk, misconduct or non-BAU.
