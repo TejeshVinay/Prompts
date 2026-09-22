@@ -1,10 +1,11 @@
 # SCP Alert Intelligence / Triage System — Implementation Plan
 
-**Status:** Draft v1
+**Status:** Draft v2 — reframed
 **Source of truth:** The project specification pasted by the author. Where this plan
 adds judgement beyond that source, the section is marked **[PLAN NOTE]**.
 **Scope:** Turn existing work (feature engineering + four trained unsupervised models)
 into a coherent, auditable pipeline ending in a supervisor-facing explanation.
+
 
 ---
 
@@ -58,6 +59,21 @@ Top 5% band, episode cohesion, episode duration vs. historical episodes of the s
 type). Treat it as descriptive context, not as a second anomaly model, unless and until
 it is explicitly designed as one.
 
+### 0.5 Current build status
+
+Two things gate everything else in this plan: the dataset, and the phases that don't
+need it.
+
+- **Buildable now, no dataset dependency:** Phase 1 (audit), Phase 2 (episodic linking),
+  Phase 3 (feature engineering). These operate on existing code, existing episodic-linking
+  logic, and the alert schema — not on a full training run.
+- **Fully specified, execution blocked on the dataset:** Phase 4 through Phase 13
+  (model audit, scoring, normalization, consensus, XAI, GraphDB, GraphRAG). These are
+  planned in full detail below so that task files can be generated from them now, but
+  actual implementation waits until the dataset is available.
+
+This split is reflected in the **Status** line under every phase heading below.
+
 ---
 
 ## 1. Target architecture
@@ -76,14 +92,22 @@ ALERT DATA
     -> SCP ASSISTANT               -> SUPERVISOR
 ```
 
+This diagram was already correct in v1 — episodic linking first, feature engineering
+second, then the model/scoring/XAI chain, then the graph layer. The phase plan below now
+follows it in the same order.
+
 ---
 
 ## 2. Phase plan
 
-Phases run in order. Each phase lists its objective, tasks, deliverables and an exit
-criterion. Do not start a phase before its predecessor's exit criterion is met.
+Phases run in order. Each phase lists its objective, tasks, deliverables, an exit
+criterion, and a status. Do not start a phase before its predecessor's exit criterion is
+met. For Phases 4–13, "exit criterion met" means the design is signed off; the actual
+run happens once the dataset unblocks it.
 
 ### PHASE 1 — Audit the existing implementation
+
+**Status:** Buildable now — audits what already exists; no new dataset required.
 
 **Objective:** Understand what exists before changing anything. Do not rewrite, do not
 retrain, do not discard work because it is imperfect.
@@ -125,365 +149,14 @@ guess. Unknowns are recorded as unknown rather than assumed.
 
 ---
 
-### PHASE 2 — Feature engineering audit and validation
+### PHASE 2 — Episodic linking
 
-**Objective:** Establish that the feature matrix represents **behaviour available at the
-time the alert was generated**. The objective is not to maximise feature count.
+**Status:** Buildable now — this is one of the two phases you can implement with what
+you currently have.
 
-**2.1 Per-feature validation table**
-
-Produce one row per feature:
-
-```
-feature
-feature_type
-source_column(s)
-calculation
-missing_percentage
-unique_count
-variance
-range
-outlier_percentage
-distribution_summary
-prediction_time_available
-possible_leakage
-redundancy/correlation
-model_compatibility
-recommendation        # KEEP | MODIFY | REMOVE | INVESTIGATE
-rationale
-```
-
-No feature is removed automatically. Every KEEP and every REMOVE carries a written
-reason.
-
-**2.2 Fields requiring particular scrutiny**
-
-These may be valuable for analysis or for GraphDB, but must not silently become ML
-features:
-
-- alert IDs, trade IDs, account IDs, supervisor IDs, rule IDs, episode IDs
-- timestamps
-- post-review fields
-- sign-off fields
-- RFI fields
-- supervisor comments
-- closure status
-- any field created after the alert was generated
-
-**[PLAN NOTE] Routing confound.** Supervisors have hierarchy and specialisation, so
-alert routing is imbalanced and supervisor identity correlates with alert type. If
-supervisor or GPN is used as a model feature, the models can learn "alerts routed here
-are unusual", which is a property of the org chart rather than of behaviour. Default
-position: supervisor and GPN are **linking keys and graph nodes, not model features**.
-If they are retained as features, the audit must state why.
-
-**2.3 Redundancy and correlation analysis**
-
-Perform:
-
-- Pearson correlation where appropriate
-- Spearman correlation where appropriate
-- categorical association where appropriate
-- near-zero variance analysis
-- duplicate/redundant feature analysis
-
-For each strongly correlated group, answer:
-
-1. Which features are strongly correlated?
-2. Do they represent genuinely different business concepts?
-3. Could simultaneous use overweight a particular behaviour?
-4. Is dimensionality reduction or selective removal justified?
-
-Correlated features are **not** removed blindly — anomaly models can benefit from
-multiple related behavioural signals.
-
-**2.4 Distribution artefacts**
-
-Generate: histograms/distributions, boxplots where useful, correlation matrix,
-missingness summary, feature variance summary.
-
-**2.5 Alert-level vs episode-level features**
-
-Maintain an explicit split:
-
-- **Alert-level features** — derived from the alert itself.
-- **Episode-level features** — e.g. `episode_alert_count`, `episode_duration`, number of
-  related alerts, activity frequency within episode, distinct entity count, temporal
-  density, operation/action count, historical episode characteristics.
-
-**2.6 Temporal leakage rule**
-
-If Alert A occurs at T1 and Alert B at T2 > T1, features for Alert A must not use
-information from B. Every episode-derived feature must be computable from data known at
-the alert's own timestamp.
-
-Label every feature as either:
-
-- **REAL-TIME AVAILABLE** — usable in the production scoring path
-- **RETROSPECTIVE ONLY** — usable for analysis and reporting, not for scoring
-
-**[PLAN NOTE]** Most naive episode features (`episode_alert_count`, `episode_duration`)
-are retrospective by construction, because the episode is not complete when its first
-alert arrives. The fix is to define them as-of the alert timestamp — e.g. "number of
-prior linked alerts in the 30 days before this alert" rather than "size of the episode
-this alert ended up in". Expect to rewrite several features here.
-
-**Deliverables:** Feature Engineering Validation Report; validated feature matrix;
-real-time vs retrospective feature register.
-
-**Exit criterion:** Every feature carries a recommendation and a leakage verdict, and
-the feature matrix used for scoring contains no RETROSPECTIVE ONLY feature.
-
----
-
-### PHASE 3 — Audit the four models and their scoring functions
-
-**Objective:** Know exactly what each trained model outputs before consuming it.
-
-The four models and their definitions of unusualness:
-
-| Model | Definition of unusualness |
-|---|---|
-| Isolation Forest | Isolates observations through recursive/random partitioning |
-| Local Outlier Factor | Evaluates local density relative to neighbouring observations |
-| Autoencoder | Reconstructs normal patterns; reconstruction error is the signal |
-| One-Class SVM | Learns a boundary around the distribution; outside = anomalous |
-
-For each model record:
-
-- raw score and its exact scoring function
-- score direction (does higher or lower mean more anomalous?)
-- score distribution and range
-- required preprocessing (scaling, encoding) and whether it matches Phase 2 output
-
-**Critical fact:** raw scores across these four models are **not directly comparable**.
-Nothing downstream may compare or combine raw scores.
-
-**Exit criterion:** A signed-off table of the four scoring functions and directions.
-
----
-
-### PHASE 4 — Generate raw scores for all alerts
-
-Run all four models over the validated feature matrix. Persist raw scores alongside
-`alert_id`. No transformation at this stage.
-
-**Deliverable:** Raw Model Score Table.
-
----
-
-### PHASE 5 — Common score representation
-
-**Objective:** Put all four models on one anomaly-oriented scale. This is one of the
-most important parts of the implementation.
-
-Per model:
-
-```
-raw model score
-    -> correct score direction (so that higher = more anomalous)
-    -> rank / percentile
-    -> 0-100 anomaly scale
-```
-
-Interpretation:
-
-- `0` = relatively normal compared with the evaluated population
-- `100` = relatively highly anomalous compared with the evaluated population
-
-This is **not a probability**.
-
-Example (normalized percentiles, not raw scores):
-
-```
-Alert A:  IF = 97   LOF = 94   AE = 96   OCSVM = 92
-```
-
-**[PLAN NOTE]** Percentile normalisation is relative to the evaluated population, so the
-score answers "how unusual is this alert compared to this batch" rather than "how
-unusual in absolute terms". Two consequences to document and decide:
-
-1. Fix the reference population explicitly (full historical corpus vs. rolling window
-   vs. per-event-type cohort). Scores are not comparable across different reference
-   populations.
-2. For production scoring of new alerts, freeze the percentile mapping from a reference
-   run rather than recomputing ranks per batch, otherwise yesterday's 95th percentile is
-   not today's.
-
-**Deliverable:** Normalized Model Score Table.
-
----
-
-### PHASE 6 — Consensus score and model agreement
-
-```
-consensus_anomaly_score = mean(IF_pct, LOF_pct, AE_pct, OCSVM_pct)
-
-model_agreement = standard deviation of the four normalized scores
-                  (low sd  = models agree
-                   high sd = models disagree)
-```
-
-Model disagreement must **not** be hidden.
-
-Worked examples:
-
-```
-Alert A:  IF 97  LOF 95  AE 96  OCSVM 94
-          consensus = 95.5   agreement = high   (strong multi-model evidence)
-
-Alert B:  IF 98  LOF 51  AE 47  OCSVM 55
-          consensus = 62.75  agreement = low    (models see this differently)
-```
-
-**Deliverables:** Consensus Anomaly Score Table; Model Agreement Analysis.
-
----
-
-### PHASE 7 — Model comparison
-
-Calculate:
-
-- Spearman rank correlation between models
-- Pearson correlation where meaningful
-- Top 1% / Top 5% / Top 10% overlap
-- intersection of all four models
-- pairwise overlap
-
-**Deliverable:** Model Comparison Report answering "Are the four models identifying
-similar anomalous observations?" and "Where do they disagree?".
-
-**[PLAN NOTE]** This phase is also the evidence base for whether four models are
-warranted. If two models correlate above ~0.95 in rank and their top-K sets largely
-coincide, they are contributing one signal at twice the explanation cost. Record the
-finding; decide on model count after seeing it, not before.
-
----
-
-### PHASE 8 — Ranking and banding (no forced binary label)
-
-Do **not** create an arbitrary `anomaly = score > 0.5`.
-
-Emit instead:
-
-- `consensus_anomaly_score`
-- `global_rank`
-- `percentile`
-- `percentile_band` ∈ {Top 1%, Top 5%, Top 10%, Normal range}
-
-A hard operational threshold is introduced only after the score distribution and its
-business meaning are understood.
-
-**Master alert-level output table:**
-
-```
-alert_id
-episode_id
-IF_raw_score,     IF_anomaly_percentile
-LOF_raw_score,    LOF_anomaly_percentile
-AE_raw_score,     AE_anomaly_percentile
-OCSVM_raw_score,  OCSVM_anomaly_percentile
-consensus_anomaly_score
-model_agreement
-global_rank
-percentile_band
-<validated feature set>
-```
-
----
-
-### PHASE 9 — Model-specific XAI
-
-XAI has two separate purposes that must not be mixed:
-
-- **A. Model XAI** — "Why did the model consider this alert anomalous?"
-- **B. Graph/episode context** — "What is happening around this alert?"
-
-This phase covers A only.
-
-**9A. Isolation Forest — feature attribution (SHAP where technically appropriate)**
-
-Per selected high-anomaly alert, emit: `feature`, `feature_value`, `contribution`,
-`direction`. Rank by contribution.
-
-**9B. Autoencoder — reconstruction-error explanation**
-
-Per selected alert, emit: `original_value`, `reconstructed_value`, `absolute_error`,
-`squared_error`, `contribution_percentage`. Rank features by contribution to total
-reconstruction error.
-
-**This is not SHAP and must not be labelled SHAP.**
-
-**9C. LOF — local perturbation / sensitivity explanation**
-
-LOF is a local-density algorithm and has no native tree-style attribution. Procedure:
-
-1. Calculate original LOF score.
-2. Perturb one feature at a time toward a valid reference value.
-3. Recalculate the anomaly score.
-4. Measure the change.
-5. Rank features by score impact.
-
-Label the output explicitly as **"local perturbation-based explanation"**, not a causal
-explanation.
-
-**9D. One-Class SVM**
-
-Use an explanation method valid for the trained implementation. Where SHAP is
-technically valid, use it; otherwise use a model-agnostic local perturbation/sensitivity
-approach. Do not copy the Isolation Forest method across by assumption.
-
-**9E. Unified explanation object**
-
-Per selected high-anomaly alert:
-
-```
-Alert:                    A102
-Consensus anomaly score:  95.4
-Model agreement:          High
-Model evidence:
-    Isolation Forest   97 percentile
-    LOF                94 percentile
-    Autoencoder        96 percentile
-    One-Class SVM      95 percentile
-Top contributing behavioural features:
-    feature_1, feature_2, feature_3
-Model-specific evidence:
-    <per-model detail as above>
-```
-
-It must answer: how anomalous is the alert; do the models agree; which behavioural
-features contributed; which models give the strongest evidence; is the anomaly driven by
-one model or several.
-
-**[PLAN NOTE]** The top-contributing-features line is a summary across four differently
-derived attributions, which are not on a common scale. Define the aggregation rule
-explicitly (e.g. rank-vote across models, or attribute only from the highest-scoring
-model) and state the rule in the supervisor-facing output. Do not average raw
-attribution magnitudes across methods.
-
-**9F. Counterfactual explanations**
-
-Question answered: *"What minimal feature changes would move this observation toward the
-learned normal region?"*
-
-Not: "What should the trader have done?" Not: "This caused the suspicious behaviour."
-
-Required phrasing: *"According to the model, moving feature X toward the learned normal
-range would reduce the anomaly score."*
-
-Respect valid ranges, non-negative constraints, categorical constraints, and
-business-valid feature combinations. Generate for **selected alerts only**, not all 50K.
-
-**Deliverables:** Model-specific XAI results; counterfactual explanations for selected
-alerts.
-
----
-
-### PHASE 10 — Episodic context integration
-
-Episodic linking is **not** an anomaly detector. Its purpose is to determine which alerts
-belong to the same underlying business/activity lifecycle.
+**Objective:** Determine which alerts belong to the same underlying business/activity
+lifecycle. Episodic linking is **not** an anomaly detector — it must run independently of
+and prior to the ML layer, using only relational/business signals.
 
 Illustration of one episode:
 
@@ -532,11 +205,400 @@ per-section distinction (lifecycle vs transactional) as edge metadata rather tha
 separate graphs. Fix this schema before finalising the scoring weights — everything in
 Phase 12's episode explanation depends on it.
 
+**[PLAN NOTE] Why this now sits before feature engineering:** once `episode_id` and the
+edge evidence schema exist, Phase 3's episode-derived features (§3.5–3.6 below) can be
+computed directly from real linking output — "number of prior linked alerts in the 30
+days before this alert" — instead of being designed against a placeholder.
+
 **Deliverable:** Episode/Alert relationship table.
+
+**Exit criterion:** Every alert carries a single `episode_id`; edge evidence schema is
+populated and signed off; episode size distribution reviewed for chaining.
+
+---
+
+### PHASE 3 — Feature engineering audit and validation
+
+**Status:** Buildable now — the second of the two phases you can implement with what
+you currently have.
+
+**Objective:** Establish that the feature matrix represents **behaviour available at the
+time the alert was generated**. The objective is not to maximise feature count.
+
+**3.1 Per-feature validation table**
+
+Produce one row per feature:
+
+```
+feature
+feature_type
+source_column(s)
+calculation
+missing_percentage
+unique_count
+variance
+range
+outlier_percentage
+distribution_summary
+prediction_time_available
+possible_leakage
+redundancy/correlation
+model_compatibility
+recommendation        # KEEP | MODIFY | REMOVE | INVESTIGATE
+rationale
+```
+
+No feature is removed automatically. Every KEEP and every REMOVE carries a written
+reason.
+
+**3.2 Fields requiring particular scrutiny**
+
+These may be valuable for analysis or for GraphDB, but must not silently become ML
+features:
+
+- alert IDs, trade IDs, account IDs, supervisor IDs, rule IDs, episode IDs
+- timestamps
+- post-review fields
+- sign-off fields
+- RFI fields
+- supervisor comments
+- closure status
+- any field created after the alert was generated
+
+**[PLAN NOTE] Routing confound.** Supervisors have hierarchy and specialisation, so
+alert routing is imbalanced and supervisor identity correlates with alert type. If
+supervisor or GPN is used as a model feature, the models can learn "alerts routed here
+are unusual", which is a property of the org chart rather than of behaviour. Default
+position: supervisor and GPN are **linking keys and graph nodes, not model features**.
+If they are retained as features, the audit must state why.
+
+**3.3 Redundancy and correlation analysis**
+
+Perform:
+
+- Pearson correlation where appropriate
+- Spearman correlation where appropriate
+- categorical association where appropriate
+- near-zero variance analysis
+- duplicate/redundant feature analysis
+
+For each strongly correlated group, answer:
+
+1. Which features are strongly correlated?
+2. Do they represent genuinely different business concepts?
+3. Could simultaneous use overweight a particular behaviour?
+4. Is dimensionality reduction or selective removal justified?
+
+Correlated features are **not** removed blindly — anomaly models can benefit from
+multiple related behavioural signals.
+
+**3.4 Distribution artefacts**
+
+Generate: histograms/distributions, boxplots where useful, correlation matrix,
+missingness summary, feature variance summary.
+
+**3.5 Alert-level vs episode-level features**
+
+Maintain an explicit split:
+
+- **Alert-level features** — derived from the alert itself.
+- **Episode-level features** — e.g. `episode_alert_count`, `episode_duration`, number of
+  related alerts, activity frequency within episode, distinct entity count, temporal
+  density, operation/action count, historical episode characteristics. These are
+  computed from Phase 2's `episode_id` and edge evidence, now that linking runs first.
+
+**3.6 Temporal leakage rule**
+
+If Alert A occurs at T1 and Alert B at T2 > T1, features for Alert A must not use
+information from B. Every episode-derived feature must be computable from data known at
+the alert's own timestamp.
+
+Label every feature as either:
+
+- **REAL-TIME AVAILABLE** — usable in the production scoring path
+- **RETROSPECTIVE ONLY** — usable for analysis and reporting, not for scoring
+
+**[PLAN NOTE]** Most naive episode features (`episode_alert_count`, `episode_duration`)
+are retrospective by construction, because the episode is not complete when its first
+alert arrives. The fix is to define them as-of the alert timestamp — e.g. "number of
+prior linked alerts in the 30 days before this alert" rather than "size of the episode
+this alert ended up in". Expect to rewrite several features here.
+
+**Deliverables:** Feature Engineering Validation Report; validated feature matrix;
+real-time vs retrospective feature register.
+
+**Exit criterion:** Every feature carries a recommendation and a leakage verdict, and
+the feature matrix used for scoring contains no RETROSPECTIVE ONLY feature.
+
+---
+
+### PHASE 4 — Audit the four models and their scoring functions
+
+**Status:** Planned — fully specified; execution (auditing real outputs) is blocked
+until the dataset is available. The scoring-function definitions below can be documented
+now; signing off the table against real outputs waits for data.
+
+**Objective:** Know exactly what each trained model outputs before consuming it.
+
+The four models and their definitions of unusualness:
+
+| Model | Definition of unusualness |
+|---|---|
+| Isolation Forest | Isolates observations through recursive/random partitioning |
+| Local Outlier Factor | Evaluates local density relative to neighbouring observations |
+| Autoencoder | Reconstructs normal patterns; reconstruction error is the signal |
+| One-Class SVM | Learns a boundary around the distribution; outside = anomalous |
+
+For each model record:
+
+- raw score and its exact scoring function
+- score direction (does higher or lower mean more anomalous?)
+- score distribution and range
+- required preprocessing (scaling, encoding) and whether it matches Phase 3 output
+
+**Critical fact:** raw scores across these four models are **not directly comparable**.
+Nothing downstream may compare or combine raw scores.
+
+**Exit criterion:** A signed-off table of the four scoring functions and directions.
+
+---
+
+### PHASE 5 — Generate raw scores for all alerts
+
+**Status:** Planned — blocked on dataset availability.
+
+Run all four models over the validated feature matrix. Persist raw scores alongside
+`alert_id`. No transformation at this stage.
+
+**Deliverable:** Raw Model Score Table.
+
+---
+
+### PHASE 6 — Common score representation
+
+**Status:** Planned — blocked on dataset availability. The normalization design below
+is final; only the run against real scores is blocked.
+
+**Objective:** Put all four models on one anomaly-oriented scale. This is one of the
+most important parts of the implementation.
+
+Per model:
+
+```
+raw model score
+    -> correct score direction (so that higher = more anomalous)
+    -> rank / percentile
+    -> 0-100 anomaly scale
+```
+
+Interpretation:
+
+- `0` = relatively normal compared with the evaluated population
+- `100` = relatively highly anomalous compared with the evaluated population
+
+This is **not a probability**.
+
+Example (normalized percentiles, not raw scores):
+
+```
+Alert A:  IF = 97   LOF = 94   AE = 96   OCSVM = 92
+```
+
+**[PLAN NOTE]** Percentile normalisation is relative to the evaluated population, so the
+score answers "how unusual is this alert compared to this batch" rather than "how
+unusual in absolute terms". Two consequences to document and decide:
+
+1. Fix the reference population explicitly (full historical corpus vs. rolling window
+   vs. per-event-type cohort). Scores are not comparable across different reference
+   populations.
+2. For production scoring of new alerts, freeze the percentile mapping from a reference
+   run rather than recomputing ranks per batch, otherwise yesterday's 95th percentile is
+   not today's.
+
+**Deliverable:** Normalized Model Score Table.
+
+---
+
+### PHASE 7 — Consensus score and model agreement
+
+**Status:** Planned — blocked on dataset availability.
+
+```
+consensus_anomaly_score = mean(IF_pct, LOF_pct, AE_pct, OCSVM_pct)
+
+model_agreement = standard deviation of the four normalized scores
+                  (low sd  = models agree
+                   high sd = models disagree)
+```
+
+Model disagreement must **not** be hidden.
+
+Worked examples:
+
+```
+Alert A:  IF 97  LOF 95  AE 96  OCSVM 94
+          consensus = 95.5   agreement = high   (strong multi-model evidence)
+
+Alert B:  IF 98  LOF 51  AE 47  OCSVM 55
+          consensus = 62.75  agreement = low    (models see this differently)
+```
+
+**Deliverables:** Consensus Anomaly Score Table; Model Agreement Analysis.
+
+---
+
+### PHASE 8 — Model comparison
+
+**Status:** Planned — blocked on dataset availability.
+
+Calculate:
+
+- Spearman rank correlation between models
+- Pearson correlation where meaningful
+- Top 1% / Top 5% / Top 10% overlap
+- intersection of all four models
+- pairwise overlap
+
+**Deliverable:** Model Comparison Report answering "Are the four models identifying
+similar anomalous observations?" and "Where do they disagree?".
+
+**[PLAN NOTE]** This phase is also the evidence base for whether four models are
+warranted. If two models correlate above ~0.95 in rank and their top-K sets largely
+coincide, they are contributing one signal at twice the explanation cost. Record the
+finding; decide on model count after seeing it, not before.
+
+---
+
+### PHASE 9 — Ranking and banding (no forced binary label)
+
+**Status:** Planned — blocked on dataset availability.
+
+Do **not** create an arbitrary `anomaly = score > 0.5`.
+
+Emit instead:
+
+- `consensus_anomaly_score`
+- `global_rank`
+- `percentile`
+- `percentile_band` ∈ {Top 1%, Top 5%, Top 10%, Normal range}
+
+A hard operational threshold is introduced only after the score distribution and its
+business meaning are understood.
+
+**Master alert-level output table:**
+
+```
+alert_id
+episode_id
+IF_raw_score,     IF_anomaly_percentile
+LOF_raw_score,    LOF_anomaly_percentile
+AE_raw_score,     AE_anomaly_percentile
+OCSVM_raw_score,  OCSVM_anomaly_percentile
+consensus_anomaly_score
+model_agreement
+global_rank
+percentile_band
+<validated feature set>
+```
+
+---
+
+### PHASE 10 — Model-specific XAI
+
+**Status:** Planned — blocked on dataset availability (requires scored alerts from
+Phases 5–9 to explain).
+
+XAI has two separate purposes that must not be mixed:
+
+- **A. Model XAI** — "Why did the model consider this alert anomalous?"
+- **B. Graph/episode context** — "What is happening around this alert?"
+
+This phase covers A only.
+
+**10A. Isolation Forest — feature attribution (SHAP where technically appropriate)**
+
+Per selected high-anomaly alert, emit: `feature`, `feature_value`, `contribution`,
+`direction`. Rank by contribution.
+
+**10B. Autoencoder — reconstruction-error explanation**
+
+Per selected alert, emit: `original_value`, `reconstructed_value`, `absolute_error`,
+`squared_error`, `contribution_percentage`. Rank features by contribution to total
+reconstruction error.
+
+**This is not SHAP and must not be labelled SHAP.**
+
+**10C. LOF — local perturbation / sensitivity explanation**
+
+LOF is a local-density algorithm and has no native tree-style attribution. Procedure:
+
+1. Calculate original LOF score.
+2. Perturb one feature at a time toward a valid reference value.
+3. Recalculate the anomaly score.
+4. Measure the change.
+5. Rank features by score impact.
+
+Label the output explicitly as **"local perturbation-based explanation"**, not a causal
+explanation.
+
+**10D. One-Class SVM**
+
+Use an explanation method valid for the trained implementation. Where SHAP is
+technically valid, use it; otherwise use a model-agnostic local perturbation/sensitivity
+approach. Do not copy the Isolation Forest method across by assumption.
+
+**10E. Unified explanation object**
+
+Per selected high-anomaly alert:
+
+```
+Alert:                    A102
+Consensus anomaly score:  95.4
+Model agreement:          High
+Model evidence:
+    Isolation Forest   97 percentile
+    LOF                94 percentile
+    Autoencoder        96 percentile
+    One-Class SVM      95 percentile
+Top contributing behavioural features:
+    feature_1, feature_2, feature_3
+Model-specific evidence:
+    <per-model detail as above>
+```
+
+It must answer: how anomalous is the alert; do the models agree; which behavioural
+features contributed; which models give the strongest evidence; is the anomaly driven by
+one model or several.
+
+**[PLAN NOTE]** The top-contributing-features line is a summary across four differently
+derived attributions, which are not on a common scale. Define the aggregation rule
+explicitly (e.g. rank-vote across models, or attribute only from the highest-scoring
+model) and state the rule in the supervisor-facing output. Do not average raw
+attribution magnitudes across methods.
+
+**10F. Counterfactual explanations**
+
+Question answered: *"What minimal feature changes would move this observation toward the
+learned normal region?"*
+
+Not: "What should the trader have done?" Not: "This caused the suspicious behaviour."
+
+Required phrasing: *"According to the model, moving feature X toward the learned normal
+range would reduce the anomaly score."*
+
+Respect valid ranges, non-negative constraints, categorical constraints, and
+business-valid feature combinations. Generate for **selected alerts only**, not all 50K.
+
+**Deliverables:** Model-specific XAI results; counterfactual explanations for selected
+alerts.
 
 ---
 
 ### PHASE 11 — GraphDB
+
+**Status:** Planned — schema design can proceed now (it depends on Phase 2's edge
+evidence schema, not on the dataset); populating it with ML-derived node properties is
+blocked until Phases 5–10 produce real scores.
 
 GraphDB is a separate contextual layer. The ML models determine anomalousness; the graph
 represents relationships. **Only create relationships supported by the dataset. Do not
@@ -579,6 +641,10 @@ ALERT -> ML SCORE -> XAI EVIDENCE -> EPISODE -> RELATED ALERTS -> ENTITIES / ACT
 
 ### PHASE 12 — Graph retrieval layer
 
+**Status:** Planned — the query set can be designed now against Phase 2's schema;
+`alert_evidence` and related-history queries need Phases 5–10's scores to return real
+data.
+
 Expose ML + XAI + episode information through graph retrieval before building the
 conversational layer.
 
@@ -607,7 +673,9 @@ answer different questions and must stay visually distinct in the supervisor UI.
 
 ---
 
-### PHASE 13 — GraphRAG and supervisor-facing explanation
+### PHASE 13 — GraphRAG and supervisor-facing explanation (SCP Assistant)
+
+**Status:** Planned — blocked on Phases 5–12; this is the final assembly layer.
 
 **Pipeline:**
 
@@ -642,25 +710,26 @@ answers; final supervisor-facing explanation format.
 
 ## 3. Deliverables checklist
 
-| # | Deliverable | Phase |
-|---|---|---|
-| 1 | Feature Engineering Validation Report | 2 |
-| 2 | Feature matrix used by the models | 2 |
-| 3 | Four Model Evaluation Report | 3 |
-| 4 | Raw Model Score Table | 4 |
-| 5 | Normalized Model Score Table | 5 |
-| 6 | Consensus Anomaly Score Table | 6 |
-| 7 | Model Agreement Analysis | 6 |
-| 8 | Top-K Model Overlap Analysis | 7 |
-| 9 | Model-specific XAI results | 9 |
-| 10 | Counterfactual explanations for selected alerts | 9 |
-| 11 | Episode/Alert relationship table | 10 |
-| 12 | GraphDB schema | 11 |
-| 13 | Populated GraphDB | 11 |
-| 14 | GraphRAG retrieval pipeline | 13 |
-| 15 | Example supervisor questions and grounded answers | 13 |
-| 16 | Final end-to-end architecture diagram | 13 |
-| 17 | Terminology explainer (see §4) | 13 |
+| # | Deliverable | Phase | Status |
+|---|---|---|---|
+| 1 | Existing Implementation Audit | 1 | Buildable now |
+| 2 | Episode/Alert relationship table | 2 | Buildable now |
+| 3 | Feature Engineering Validation Report | 3 | Buildable now |
+| 4 | Feature matrix used by the models | 3 | Buildable now |
+| 5 | Four Model Evaluation Report | 4 | Planned |
+| 6 | Raw Model Score Table | 5 | Planned |
+| 7 | Normalized Model Score Table | 6 | Planned |
+| 8 | Consensus Anomaly Score Table | 7 | Planned |
+| 9 | Model Agreement Analysis | 7 | Planned |
+| 10 | Top-K Model Overlap Analysis | 8 | Planned |
+| 11 | Model-specific XAI results | 10 | Planned |
+| 12 | Counterfactual explanations for selected alerts | 10 | Planned |
+| 13 | GraphDB schema | 11 | Design buildable now; population planned |
+| 14 | Populated GraphDB | 11 | Planned |
+| 15 | GraphRAG retrieval pipeline | 13 | Planned |
+| 16 | Example supervisor questions and grounded answers | 13 | Planned |
+| 17 | Final end-to-end architecture diagram | 13 | Planned |
+| 18 | Terminology explainer (see §4) | 13 | Buildable now |
 
 ---
 
@@ -696,12 +765,12 @@ These are unresolved and block later phases. Record the decision and its date wh
 
 | # | Decision | Blocks | Owner |
 |---|---|---|---|
-| 1 | Reference population for percentile normalisation (full corpus / rolling window / per-event-type cohort) | Phase 5 | |
-| 2 | Frozen vs recomputed percentile mapping for new alerts | Phase 5, production scoring | |
-| 3 | Whether supervisor/GPN are model features or linking keys only | Phase 2 | |
-| 4 | Aggregation rule for cross-model "top contributing features" | Phase 9E | |
-| 5 | Whether four models are retained after the Phase 7 overlap evidence | Phase 7 | |
-| 6 | Definition of episode-level signal (descriptive context vs scored quantity) | Phase 10, 12 | |
+| 1 | Reference population for percentile normalisation (full corpus / rolling window / per-event-type cohort) | Phase 6 | |
+| 2 | Frozen vs recomputed percentile mapping for new alerts | Phase 6, production scoring | |
+| 3 | Whether supervisor/GPN are model features or linking keys only | Phase 3 | |
+| 4 | Aggregation rule for cross-model "top contributing features" | Phase 10E | |
+| 5 | Whether four models are retained after the Phase 8 overlap evidence | Phase 8 | |
+| 6 | Definition of episode-level signal (descriptive context vs scored quantity) | Phase 2, 12 | |
 | 7 | Approved LLM deployment for the GraphRAG layer | Phase 13 | |
 | 8 | Graph database choice (prototype in-memory vs property graph) | Phase 11 | |
 | 9 | Whether supervisors review related alerts together today — determines whether episode-level output is actionable in their workflow | Phase 12, 13 | |
@@ -718,3 +787,6 @@ These are unresolved and block later phases. Record the decision and its date wh
 6. Do not average alert scores into an episode anomaly score.
 7. Do not let the LLM or GraphRAG act as the anomaly detector.
 8. Do not present anomaly as equivalent to risk, misconduct or non-BAU.
+9. **[PLAN NOTE]** Do not begin executing Phase 4 onward before the dataset is
+   confirmed available — design and spec work for those phases can continue, but scoring,
+   consensus, XAI, and graph population all require real data to sign off against.
